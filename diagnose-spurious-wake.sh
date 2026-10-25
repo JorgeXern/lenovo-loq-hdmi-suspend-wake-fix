@@ -347,14 +347,9 @@ do_diagnose() {
     local -a pins
     mapfile -t pins < <(grep -oP 'GPIO \K[0-9]+(?= is active)' <<<"$klog" | sort -un)
 
-    local spurious=0
+    local short=0
     if [[ -n ${slept:-} ]] && (( slept < SPURIOUS_THRESHOLD )); then
-        spurious=1
-        echo
-        echo "  -> It slept only ${slept}s: this looks like a spurious wake."
-    elif [[ -n ${slept:-} ]]; then
-        echo
-        echo "  -> It slept ${slept}s and woke on your input: this looks healthy."
+        short=1
     fi
 
     # ------------------------------------------------------------ ACPI lookup
@@ -391,7 +386,17 @@ do_diagnose() {
     # ------------------------------------------------------------ remediation
     local ctrl
     ctrl=$(gpio_controller)
-    [[ ${#pins[@]} -gt 0 && -n $ctrl ]] || { echo; echo "(pm_debug_messages stays enabled until the next reboot)"; return 0; }
+    if [[ ${#pins[@]} -eq 0 || -z $ctrl ]]; then
+        say "Verdict"
+        if [[ $short -eq 1 ]]; then
+            echo "  Slept only ${slept}s, but no pinctrl_amd GPIO wake was reported: this script"
+            echo "  cannot propose a fix. Check the wake IRQ and messages above."
+        else
+            echo "  Slept ${slept:-?}s until woken: healthy. Nothing to fix."
+        fi
+        echo; echo "(pm_debug_messages stays enabled until the next reboot)"
+        return 0
+    fi
 
     local -a candidates=() protected=() unknown=()
     for p in "${pins[@]}"; do
@@ -408,26 +413,35 @@ do_diagnose() {
         fi
     done
 
-    say "Remediation"
+    local -a to_apply=("${candidates[@]}" "${unknown[@]}")
+
+    say "Verdict"
     [[ ${#protected[@]} -gt 0 ]] && kv "legitimate pins" "${protected[*]} (never ignored)"
 
-    if [[ $spurious -ne 1 ]]; then
-        echo "  The wake was not spurious, so there is nothing to fix."
+    if [[ $short -ne 1 ]]; then
+        echo "  Slept ${slept:-?}s until woken: healthy. Nothing to fix."
+        echo; echo "(pm_debug_messages stays enabled until the next reboot)"
+        return 0
+    fi
+    if [[ ${#to_apply[@]} -eq 0 ]]; then
+        cat <<EOF
+  Slept only ${slept}s, but the wake came from a legitimate source
+  (pin(s) ${protected[*]:-?}: USB, lid, button, AC or battery). Most likely you
+  woke it yourself before ${SPURIOUS_THRESHOLD}s. Nothing to fix.
+  If you really did not touch anything, a USB device (for example a mouse
+  picking up movement) woke it. Run again and wait at least a minute.
+EOF
         echo; echo "(pm_debug_messages stays enabled until the next reboot)"
         return 0
     fi
 
-    local -a to_apply=("${candidates[@]}")
+    echo "  Slept only ${slept}s and woke from pin(s) ${to_apply[*]}: spurious wake."
     if [[ ${#unknown[@]} -gt 0 ]]; then
         warn "pin(s) ${unknown[*]} could not be classified (no ACPI info). Only ignore them if you are"
         warn "sure you did not touch any input device during the test."
-        to_apply+=("${unknown[@]}")
     fi
-    if [[ ${#to_apply[@]} -eq 0 ]]; then
-        echo "  No pin is safe to ignore automatically."
-        echo; echo "(pm_debug_messages stays enabled until the next reboot)"
-        return 0
-    fi
+
+    say "Remediation"
 
     local add="" old new
     for p in "${to_apply[@]}"; do add=$(merge_entries "$add" "${ctrl}@${p}"); done
