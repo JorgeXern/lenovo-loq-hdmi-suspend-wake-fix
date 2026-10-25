@@ -152,3 +152,18 @@ PM: suspend exit                  19:14:27
 A ~6-minute mains power cut happened during this sleep: the laptop switched to
 battery and back, and the HDMI monitor lost power and came back on. Neither
 woke the machine; only the keyboard did, 23.5 minutes after it went to sleep.
+
+## Test H — first full night with the final config
+
+```
+25 00:10:38  slept   35503 s
+
+PM: suspend entry (s2idle)        00:10:38
+GPIO 59 is active: 0x3801f900     10:02:20
+GPIO 59 is active: 0x1801f900     10:02:20
+PM: suspend exit                  10:02:22
+```
+
+One suspend for the whole night (9 h 51 min), woken only by the keyboard,
+no reboots or hangs in the boot. Compare with the bounce log in
+[02-bounce-cycles.md](02-bounce-cycles.md): ~60 cycles of 5–7 s the night before.

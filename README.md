@@ -136,6 +136,8 @@ Then suspend with the monitor connected and don't touch anything for a minute. T
 
 Validation on the tested system: 23.5 minutes of uninterrupted sleep with the HDMI monitor connected, **including a real 6-minute power outage** (AC unplugged/replugged and the monitor power-cycled) without a single wake; woken only by the keyboard.
 
+First full night with the fix: **one** suspend of **9 h 51 min** (00:10 → 10:02), woken by the keyboard (`GPIO 59`). The night before, without the fix, there were about 60 suspends of 5–7 s each, ending in a hang.
+
 After a kernel update, check `cat /proc/cmdline` still contains the parameter. After a **BIOS update**, re-run the diagnosis: the pin number could change.
 
 ## Other distributions

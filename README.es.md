@@ -136,6 +136,8 @@ Luego suspende con el monitor conectado y no toques nada durante un minuto. El L
 
 Validación en el equipo probado: 23,5 minutos de sueño ininterrumpido con el monitor HDMI conectado, **incluido un corte de luz real de 6 minutos** (cargador desconectado y reconectado, y el monitor apagado y vuelto a encender) sin un solo despertar. Solo lo despertó el teclado.
 
+Primera noche completa con la solución: **una** suspensión de **9 h 51 min** (00:10 → 10:02), despertada por el teclado (`GPIO 59`). La noche anterior, sin la solución, hubo unas 60 suspensiones de 5–7 s cada una, que terminaron en un cuelgue.
+
 Después de una actualización de kernel, revisa que `cat /proc/cmdline` siga incluyendo el parámetro. Después de una **actualización de BIOS**, repite el diagnóstico: el número de pin podría cambiar.
 
 ## Otras distribuciones
