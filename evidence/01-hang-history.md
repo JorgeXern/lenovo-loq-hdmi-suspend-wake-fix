@@ -35,8 +35,8 @@ are affected, so the hang is not tied to a single release.
 The hung boot's kernel log simply stops:
 
 ```
-oct 24 16:09:03 lithium kernel: PM: suspend exit
-oct 24 17:23:06 lithium kernel: PM: suspend entry (s2idle)
+oct 24 16:09:03 host kernel: PM: suspend exit
+oct 24 17:23:06 host kernel: PM: suspend entry (s2idle)
 <end of boot>
 ```
 

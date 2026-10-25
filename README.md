@@ -13,6 +13,8 @@ sudo reboot
 
 The pin keeps working as a runtime ACPI event; it just can no longer wake the system. Power button, USB keyboard/mouse and (expected) lid keep waking it normally.
 
+That command is for Fedora/RHEL (`grubby`). For Ubuntu, Debian, Mint, Arch, Pop!_OS and others see [Other distributions](#other-distributions), or let [`diagnose-spurious-wake.sh`](#diagnosing-and-fixing-with-the-script) find the wake source and apply the fix for you after asking.
+
 ---
 
 ## Contents
@@ -21,9 +23,10 @@ The pin keeps working as a runtime ACPI event; it just can no longer wake the sy
 - [Symptoms](#symptoms)
 - [Root cause](#root-cause)
 - [Applying and verifying the fix](#applying-and-verifying-the-fix)
+- [Other distributions](#other-distributions)
 - [What still wakes the machine](#what-still-wakes-the-machine)
 - [Things that did not fix it](#things-that-did-not-fix-it)
-- [Diagnosing your own machine](#diagnosing-your-own-machine)
+- [Diagnosing and fixing with the script](#diagnosing-and-fixing-with-the-script)
 - [Reverting](#reverting)
 - [Related reports and upstream position](#related-reports-and-upstream-position)
 
@@ -129,11 +132,28 @@ cat /sys/module/gpiolib_acpi/parameters/ignore_wake   # AMDI0030:00@4
 sudo dmesg | grep -i 'ignoring wake'                   # amd_gpio AMDI0030:00: Ignoring wakeup on pin 4
 ```
 
-Then suspend with the monitor connected and don't touch anything for a minute. The power LED should keep pulsing. Or run [`diagnose-spurious-wake.sh`](#diagnosing-your-own-machine).
+Then suspend with the monitor connected and don't touch anything for a minute. The power LED should keep pulsing. Or run [`diagnose-spurious-wake.sh`](#diagnosing-and-fixing-with-the-script).
 
 Validation on the tested system: 23.5 minutes of uninterrupted sleep with the HDMI monitor connected, **including a real 6-minute power outage** (AC unplugged/replugged and the monitor power-cycled) without a single wake; woken only by the keyboard.
 
 After a kernel update, check `cat /proc/cmdline` still contains the parameter. After a **BIOS update**, re-run the diagnosis: the pin number could change.
+
+## Other distributions
+
+The workaround is a plain kernel parameter, so it works on any distribution; only the way to add it changes. Check your controller name first with `ls /sys/bus/platform/drivers/amd_gpio/`, then:
+
+| Distribution / bootloader | Add the parameter | Then |
+|---|---|---|
+| Fedora, RHEL, CentOS Stream | `sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"` | reboot |
+| Ubuntu, Debian, Linux Mint, Zorin (GRUB) | append `gpiolib_acpi.ignore_wake=AMDI0030:00@4` inside the quotes of `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub` | `sudo update-grub`, reboot |
+| Arch, Manjaro, EndeavourOS (GRUB) | same edit of `/etc/default/grub` | `sudo grub-mkconfig -o /boot/grub/grub.cfg`, reboot |
+| openSUSE (GRUB 2) | same edit of `/etc/default/grub` (or YaST → Boot Loader) | `sudo grub2-mkconfig -o /boot/grub2/grub.cfg`, reboot |
+| Pop!_OS (kernelstub) | `sudo kernelstub -a "gpiolib_acpi.ignore_wake=AMDI0030:00@4"` | reboot |
+| systemd-boot | add it to the `options` line of your entries in `/boot/loader/entries/*.conf`, or to `/etc/kernel/cmdline` if your distro regenerates entries with `kernel-install` | reboot |
+
+Verify exactly as above (`cat /sys/module/gpiolib_acpi/parameters/ignore_wake` and `dmesg | grep -i 'ignoring wake'`).
+
+Models whose USB-C/DisplayPort output also self-wakes may need a second pin: the Legion Pro 5 16ARX8 uses `AMDI0030:00@2,AMDI0030:00@4`. The script below finds the right pins for your machine.
 
 ## What still wakes the machine
 
@@ -151,19 +171,37 @@ After a kernel update, check `cat /proc/cmdline` still contains the parameter. A
 - **NVIDIA suspend services:** with `UseKernelSuspendNotifiers: 1`, `nvidia-suspend.service` / `nvidia-resume.service` are **skipped by design** (`ExecCondition` only runs them when that value is 0). `PreserveVideoMemoryAllocations: 1` and empty `TemporaryFilePath` are also expected in that mode. Neither is the cause.
 - **Longer idle timeout:** it would only reduce the number of cycles, not stop the self-wakes.
 
-## Diagnosing your own machine
+## Diagnosing and fixing with the script
 
-[`diagnose-spurious-wake.sh`](diagnose-spurious-wake.sh) automates the procedure: it enables PM debug messages, suspends, waits for the resume and reports the real sleep time, the wake IRQ and its owner, the `GPIO N is active` lines, EC/Notify activity and GPE deltas, and suggests the `ignore_wake=` value for `pinctrl_amd` wakes.
+[`diagnose-spurious-wake.sh`](diagnose-spurious-wake.sh) runs the whole procedure in one go:
+
+1. Enables PM debug messages, suspends, and waits for the resume.
+2. Reports the real sleep time, the wake IRQ and its owner, the `GPIO N is active` lines, EC/Notify activity and GPE deltas.
+3. If `acpica-tools` is installed, looks up each waking pin in `_AEI` and `_EVT`.
+4. If, and only if, the wake was spurious (slept less than 30 s) and the pin is not a legitimate wake source, it proposes the `gpiolib_acpi.ignore_wake=` value and asks **`[y/N]`** before changing anything.
 
 ```bash
+sudo dnf install acpica-tools          # Fedora  (Debian/Ubuntu: sudo apt install acpica-tools)
 chmod +x diagnose-spurious-wake.sh
-./diagnose-spurious-wake.sh            # basic
-./diagnose-spurious-wake.sh --acpi     # also look the pin up in _AEI/_EVT (needs acpica-tools)
+./diagnose-spurious-wake.sh            # diagnose; offer the fix only if it is needed
+./diagnose-spurious-wake.sh --dry-run  # same, but only show what it would change
+./diagnose-spurious-wake.sh --revert   # remove the parameter again
 ```
 
-Run it with the external monitor connected and **don't touch the keyboard or mouse** until it reports. If the machine doesn't wake by itself within a minute, wake it yourself: a long sleep woken by your own input is the good result.
+Run it with the external monitor connected and **don't touch the keyboard or mouse** until it reports. If the machine doesn't wake by itself within a minute, wake it yourself: a long sleep woken by your own input is the healthy result, and the script will say there is nothing to fix.
 
-Manual equivalent:
+**Safeguards**
+
+- Pin 0, and any pin whose `_EVT` notifies a USB controller, the lid, the power/sleep button, the AC adapter or the battery, is **never** proposed: those are how you wake the laptop on purpose.
+- Pins that are not declared in `_AEI` are reported but not proposed, because `ignore_wake=` cannot act on them.
+- Without `acpica-tools` pins cannot be classified: the script warns, and still asks with "No" as the default.
+- Existing `ignore_wake=` entries are merged, not overwritten. GRUB edits back up `/etc/default/grub` first and show the diff.
+
+**How it changes the kernel command line:** it detects `kernelstub` (Pop!_OS), `grubby` (Fedora/RHEL) or `/etc/default/grub` plus `update-grub` / `grub-mkconfig` / `grub2-mkconfig`. Anything else (for example plain systemd-boot entries, which differ between distros) gets printed manual instructions instead of an automatic change.
+
+**Test status:** the diagnosis was run on the tested system above. The apply and revert paths were tested against mocked `grubby`, `kernelstub` and GRUB setups. If you use it on another distribution, please open an issue with the output.
+
+Manual equivalent of the diagnosis:
 
 ```bash
 echo 1 | sudo tee /sys/power/pm_debug_messages        # not persistent across reboots
@@ -183,9 +221,13 @@ Before posting your own logs anywhere, remove lines that identify your network (
 ## Reverting
 
 ```bash
+./diagnose-spurious-wake.sh --revert          # any supported distro, asks first
+# or by hand on Fedora:
 sudo grubby --update-kernel=ALL --remove-args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"
 sudo reboot
 ```
+
+On other distributions, remove the token from wherever you added it ([table above](#other-distributions)), regenerate the boot configuration and reboot.
 
 ## Related reports and upstream position
 

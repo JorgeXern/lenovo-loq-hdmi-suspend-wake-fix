@@ -13,6 +13,8 @@ sudo reboot
 
 El pin sigue funcionando como evento ACPI en tiempo de ejecución; solo deja de poder despertar el sistema. El botón de encendido, el teclado/ratón USB y (se espera) la tapa siguen despertándolo con normalidad.
 
+Ese comando es para Fedora/RHEL (`grubby`). Para Ubuntu, Debian, Mint, Arch, Pop!_OS y otras, revisa [Otras distribuciones](#otras-distribuciones), o deja que [`diagnose-spurious-wake.sh`](#diagnosticar-y-corregir-con-el-script) encuentre la fuente del despertar y aplique la solución, previa confirmación.
+
 ---
 
 ## Contenido
@@ -21,9 +23,10 @@ El pin sigue funcionando como evento ACPI en tiempo de ejecución; solo deja de 
 - [Síntomas](#síntomas)
 - [Causa raíz](#causa-raíz)
 - [Aplicar y verificar la solución](#aplicar-y-verificar-la-solución)
+- [Otras distribuciones](#otras-distribuciones)
 - [Qué sigue despertando el equipo](#qué-sigue-despertando-el-equipo)
 - [Lo que no lo resolvió](#lo-que-no-lo-resolvió)
-- [Diagnosticar tu propio equipo](#diagnosticar-tu-propio-equipo)
+- [Diagnosticar y corregir con el script](#diagnosticar-y-corregir-con-el-script)
 - [Revertir](#revertir)
 - [Reportes relacionados y postura upstream](#reportes-relacionados-y-postura-upstream)
 
@@ -129,11 +132,28 @@ cat /sys/module/gpiolib_acpi/parameters/ignore_wake   # AMDI0030:00@4
 sudo dmesg | grep -i 'ignoring wake'                   # amd_gpio AMDI0030:00: Ignoring wakeup on pin 4
 ```
 
-Luego suspende con el monitor conectado y no toques nada durante un minuto. El LED de encendido debería seguir parpadeando. También puedes ejecutar [`diagnose-spurious-wake.sh`](#diagnosticar-tu-propio-equipo).
+Luego suspende con el monitor conectado y no toques nada durante un minuto. El LED de encendido debería seguir parpadeando. También puedes ejecutar [`diagnose-spurious-wake.sh`](#diagnosticar-y-corregir-con-el-script).
 
 Validación en el equipo probado: 23,5 minutos de sueño ininterrumpido con el monitor HDMI conectado, **incluido un corte de luz real de 6 minutos** (cargador desconectado y reconectado, y el monitor apagado y vuelto a encender) sin un solo despertar. Solo lo despertó el teclado.
 
 Después de una actualización de kernel, revisa que `cat /proc/cmdline` siga incluyendo el parámetro. Después de una **actualización de BIOS**, repite el diagnóstico: el número de pin podría cambiar.
+
+## Otras distribuciones
+
+El workaround es un parámetro estándar del kernel, así que funciona en cualquier distribución; solo cambia la forma de agregarlo. Primero revisa el nombre de tu controlador con `ls /sys/bus/platform/drivers/amd_gpio/` y luego:
+
+| Distribución / gestor de arranque | Agregar el parámetro | Después |
+|---|---|---|
+| Fedora, RHEL, CentOS Stream | `sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"` | reiniciar |
+| Ubuntu, Debian, Linux Mint, Zorin (GRUB) | agregar `gpiolib_acpi.ignore_wake=AMDI0030:00@4` dentro de las comillas de `GRUB_CMDLINE_LINUX_DEFAULT` en `/etc/default/grub` | `sudo update-grub` y reiniciar |
+| Arch, Manjaro, EndeavourOS (GRUB) | la misma edición de `/etc/default/grub` | `sudo grub-mkconfig -o /boot/grub/grub.cfg` y reiniciar |
+| openSUSE (GRUB 2) | la misma edición de `/etc/default/grub` (o YaST → Cargador de arranque) | `sudo grub2-mkconfig -o /boot/grub2/grub.cfg` y reiniciar |
+| Pop!_OS (kernelstub) | `sudo kernelstub -a "gpiolib_acpi.ignore_wake=AMDI0030:00@4"` | reiniciar |
+| systemd-boot | agregarlo a la línea `options` de tus entradas en `/boot/loader/entries/*.conf`, o a `/etc/kernel/cmdline` si tu distro regenera las entradas con `kernel-install` | reiniciar |
+
+La verificación es la misma de arriba (`cat /sys/module/gpiolib_acpi/parameters/ignore_wake` y `dmesg | grep -i 'ignoring wake'`).
+
+Los modelos cuya salida USB-C/DisplayPort también provoca despertares pueden necesitar un segundo pin: la Legion Pro 5 16ARX8 usa `AMDI0030:00@2,AMDI0030:00@4`. El script de abajo encuentra los pines correctos para tu equipo.
 
 ## Qué sigue despertando el equipo
 
@@ -151,19 +171,37 @@ Después de una actualización de kernel, revisa que `cat /proc/cmdline` siga in
 - **Servicios de suspensión de NVIDIA:** con `UseKernelSuspendNotifiers: 1`, `nvidia-suspend.service` / `nvidia-resume.service` **se omiten por diseño** (su `ExecCondition` solo los ejecuta si ese valor es 0). `PreserveVideoMemoryAllocations: 1` y `TemporaryFilePath` vacío también son lo esperado en ese modo. Ninguno es la causa.
 - **Alargar el tiempo de inactividad:** solo reduciría la cantidad de ciclos, sin evitar los despertares espurios.
 
-## Diagnosticar tu propio equipo
+## Diagnosticar y corregir con el script
 
-[`diagnose-spurious-wake.sh`](diagnose-spurious-wake.sh) automatiza el procedimiento: activa los mensajes de depuración de PM, suspende, espera la reanudación y reporta el tiempo real de sueño, la IRQ de despertar y su dueño, las líneas `GPIO N is active`, la actividad del EC/Notify y los deltas de GPE. Para despertares de `pinctrl_amd` sugiere el valor de `ignore_wake=`.
+[`diagnose-spurious-wake.sh`](diagnose-spurious-wake.sh) hace todo el procedimiento de una vez:
+
+1. Activa los mensajes de depuración de PM, suspende y espera la reanudación.
+2. Reporta el tiempo real de sueño, la IRQ de despertar y su dueño, las líneas `GPIO N is active`, la actividad del EC/Notify y los deltas de GPE.
+3. Si `acpica-tools` está instalado, busca cada pin en el `_AEI` y el `_EVT`.
+4. Si, y solo si, el despertar fue espurio (durmió menos de 30 s) y el pin no es una fuente legítima de despertar, propone el valor de `gpiolib_acpi.ignore_wake=` y pregunta **`[y/N]`** antes de cambiar nada.
 
 ```bash
+sudo dnf install acpica-tools          # Fedora  (Debian/Ubuntu: sudo apt install acpica-tools)
 chmod +x diagnose-spurious-wake.sh
-./diagnose-spurious-wake.sh            # básico
-./diagnose-spurious-wake.sh --acpi     # además busca el pin en _AEI/_EVT (requiere acpica-tools)
+./diagnose-spurious-wake.sh            # diagnostica; ofrece la solución solo si hace falta
+./diagnose-spurious-wake.sh --dry-run  # lo mismo, pero solo muestra lo que cambiaría
+./diagnose-spurious-wake.sh --revert   # quita el parámetro
 ```
 
-Ejecútalo con el monitor externo conectado y **no toques el teclado ni el ratón** hasta que termine. Si el equipo no despierta solo en un minuto, despiértalo tú: un sueño largo interrumpido por tu propia acción es el resultado bueno.
+Ejecútalo con el monitor externo conectado y **no toques el teclado ni el ratón** hasta que termine. Si el equipo no despierta solo en un minuto, despiértalo tú: un sueño largo interrumpido por tu propia acción es el resultado sano, y el script dirá que no hay nada que corregir.
 
-Equivalente manual:
+**Salvaguardas**
+
+- El pin 0, y cualquier pin cuyo `_EVT` notifique a un controlador USB, la tapa, el botón de encendido o suspensión, el cargador o la batería, **nunca** se propone: son las formas de despertar el equipo a propósito.
+- Los pines que no están declarados en el `_AEI` se reportan pero no se proponen, porque `ignore_wake=` no puede actuar sobre ellos.
+- Sin `acpica-tools` los pines no se pueden clasificar: el script lo advierte y pregunta igual, con "No" por defecto.
+- Las entradas existentes de `ignore_wake=` se combinan, no se sobrescriben. Antes de editar GRUB se respalda `/etc/default/grub` y se muestra el diff.
+
+**Cómo cambia la línea de comandos del kernel:** detecta `kernelstub` (Pop!_OS), `grubby` (Fedora/RHEL) o `/etc/default/grub` junto con `update-grub` / `grub-mkconfig` / `grub2-mkconfig`. En cualquier otro caso (por ejemplo, entradas de systemd-boot, que varían entre distros) imprime instrucciones manuales en vez de hacer un cambio automático.
+
+**Estado de las pruebas:** el diagnóstico se ejecutó en el equipo probado. Las rutas de aplicar y revertir se probaron contra `grubby`, `kernelstub` y GRUB simulados. Si lo usas en otra distribución, abre un issue con la salida.
+
+Equivalente manual del diagnóstico:
 
 ```bash
 echo 1 | sudo tee /sys/power/pm_debug_messages        # no persiste tras reiniciar
@@ -183,9 +221,13 @@ Antes de publicar tus propios logs, elimina las líneas que identifican tu red (
 ## Revertir
 
 ```bash
+./diagnose-spurious-wake.sh --revert          # cualquier distro soportada; pregunta antes
+# o a mano en Fedora:
 sudo grubby --update-kernel=ALL --remove-args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"
 sudo reboot
 ```
+
+En otras distribuciones, quita el parámetro de donde lo agregaste ([tabla de arriba](#otras-distribuciones)), regenera la configuración de arranque y reinicia.
 
 ## Reportes relacionados y postura upstream
 
