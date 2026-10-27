@@ -115,7 +115,7 @@ GPIO 59 is active: 0x3801f900
 
 Result: stayed asleep; woken only by the USB keyboard (`GPIO 59`).
 
-## Test F — HDMI connected, `ignore_wake` only (ec_no_wakeup removed) — final config
+## Test F — HDMI connected, `ignore_wake` only (ec_no_wakeup removed) — final config for the HDMI case
 
 ```
 $ cat /proc/cmdline | tr ' ' '\n' | grep -E 'ec_no_wakeup|ignore_wake'
@@ -133,9 +133,14 @@ GPIO 59 is active: 0x3801f900   18:23:23
 PM: suspend exit                  18:23:25
 ```
 
-Result: 54 s asleep, woken only by the USB keyboard. `ignore_wake` alone is enough.
+Result: 54 s asleep, woken only by the USB keyboard. `ignore_wake` alone is enough **for the HDMI wake**.
 
-## Test G — real power outage during suspend (final config)
+> **Update 2026-10-26:** this conclusion is limited to the HDMI case. With the lid closed on
+> battery, the EC can wake the machine in a loop, which `ignore_wake` does not cover; the
+> recommended configuration is now `ignore_wake` + `acpi.ec_no_wakeup=1`. Tests G and H below ran
+> with `ignore_wake` only. See [05-ec-wake-loop.md](05-ec-wake-loop.md).
+
+## Test G — real power outage during suspend (HDMI final config, `ignore_wake` only)
 
 ```
 18:50:58  slept    1409 s
@@ -153,7 +158,7 @@ A ~6-minute mains power cut happened during this sleep: the laptop switched to
 battery and back, and the HDMI monitor lost power and came back on. Neither
 woke the machine; only the keyboard did, 23.5 minutes after it went to sleep.
 
-## Test H — first full night with the final config
+## Test H — first full night with the HDMI final config (`ignore_wake` only)
 
 ```
 25 00:10:38  slept   35503 s

@@ -2,18 +2,27 @@
 
 **[Leer en español](README.es.md)**
 
+> **Update 2026-10-26: second failure mode and corrected recommendation.**
+> With the lid closed **on battery** (for example inside a bag) the Embedded Controller can also wake the laptop in a loop: about 9 s asleep and 24 s awake, repeated for over an hour, enough to make it hot with the fans running inside the bag. `gpiolib_acpi.ignore_wake` does not cover this; `acpi.ec_no_wakeup=1` does.
+> Earlier versions of this README said `ec_no_wakeup` was not needed and would block the lid. **Both claims were wrong.** The recommended configuration is now **both parameters**. Details in [Second failure mode](#second-failure-mode-ec-wake-loop-lid-closed-on-battery).
+
 On the Lenovo LOQ 15ARP10E (AMD Ryzen 7 7735HS + NVIDIA RTX 4050, HDMI wired to the dGPU), suspending with an external HDMI monitor connected makes the laptop wake up again after 5–7 seconds. GNOME suspends it again after the idle timeout and the cycle repeats all night. Every cycle is a new chance for the suspend/resume transition to hang, which shows up as the classic *"it went to sleep and never came back"*.
 
-**Fix (workaround):** stop GPIO pin 4 from being a wake source.
+**Fix (workaround):** two kernel parameters, one per failure mode.
 
 ```bash
-sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"
+sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4 acpi.ec_no_wakeup=1"
 sudo reboot
 ```
 
-The pin keeps working as a runtime ACPI event; it just can no longer wake the system. Power button, USB keyboard/mouse and (expected) lid keep waking it normally.
+| Parameter | What it stops |
+|---|---|
+| `gpiolib_acpi.ignore_wake=AMDI0030:00@4` | GPIO pin 4 (dGPU) waking the system seconds after suspend when an HDMI monitor is connected |
+| `acpi.ec_no_wakeup=1` | Embedded Controller events waking the system from s2idle, which loops when the lid is closed on battery |
 
-That command is for Fedora/RHEL (`grubby`). For Ubuntu, Debian, Mint, Arch, Pop!_OS and others see [Other distributions](#other-distributions), or let [`diagnose-spurious-wake.sh`](#diagnosing-and-fixing-with-the-script) find the wake source and apply the fix for you after asking.
+Pin 4 keeps working as a runtime ACPI event and the EC keeps working while awake; they just can no longer wake the system. The power button, the USB keyboard/mouse and the lid keep waking it (all verified with the two parameters); see [What still wakes the machine](#what-still-wakes-the-machine).
+
+That command is for Fedora/RHEL (`grubby`). For Ubuntu, Debian, Mint, Arch, Pop!_OS and others see [Other distributions](#other-distributions), or let [`diagnose-spurious-wake.sh`](#diagnosing-and-fixing-with-the-script) find the wake source and apply the fix for you after asking. The script currently handles the HDMI part only; add `acpi.ec_no_wakeup=1` by hand.
 
 ---
 
@@ -22,6 +31,7 @@ That command is for Fedora/RHEL (`grubby`). For Ubuntu, Debian, Mint, Arch, Pop!
 - [Tested system](#tested-system)
 - [Symptoms](#symptoms)
 - [Root cause](#root-cause)
+- [Second failure mode: EC wake loop (lid closed, on battery)](#second-failure-mode-ec-wake-loop-lid-closed-on-battery)
 - [Applying and verifying the fix](#applying-and-verifying-the-fix)
 - [Other distributions](#other-distributions)
 - [What still wakes the machine](#what-still-wakes-the-machine)
@@ -115,7 +125,56 @@ The rest of the `_EVT` table matches what was observed:
 
 `GZFD.HTPE` / `DSMF` look like Lenovo "Gaming Zone" / GPU-mode logic; their exact role is unknown and not needed for the workaround.
 
-Full logs and table excerpts are in [`evidence/`](evidence/): [hang history](evidence/01-hang-history.md), [bounce cycles](evidence/02-bounce-cycles.md), [wake source tests A–G](evidence/03-wake-source-tests.md) and [ACPI `_AEI`/`_EVT`](evidence/04-acpi-excerpts.md).
+Full logs and table excerpts are in [`evidence/`](evidence/): [hang history](evidence/01-hang-history.md), [bounce cycles](evidence/02-bounce-cycles.md), [wake source tests A–H](evidence/03-wake-source-tests.md), [ACPI `_AEI`/`_EVT`](evidence/04-acpi-excerpts.md) and [EC wake loop](evidence/05-ec-wake-loop.md).
+
+## Second failure mode: EC wake loop (lid closed, on battery)
+
+Found two days after the HDMI fix was in place: the laptop was put in a bag with the lid closed, **on battery**, no external monitor. Opened 73 minutes later, it was hot with the fans running.
+
+**Symptoms** (from the journal of that boot):
+
+- **119 suspend/resume cycles** between 18:10 and 19:22. Each one slept about 9 s (kernel `suspend entry` → `suspend exit`), then stayed awake about 24 s until logind saw the lid still closed and suspended it again. The machine was awake roughly two thirds of the time.
+- Battery: **75 % → 63 % in 23 minutes**, about **17 W** on average, against about 0.5 W in a healthy suspend. Inside a bag that power turns into heat.
+- The same loop had already happened the night before (33 cycles in 21 minutes, lid closed) and in shorter bursts.
+- No `Lid opened` events during the loop, `HandleLidSwitch=suspend`, 0 failed suspends: logind and the suspend itself were working as designed.
+
+**Wake chain** (`pm_debug_messages` was still enabled in that boot):
+
+```
+PM: suspend entry (s2idle)
+PM: Triggering wakeup from IRQ 9               <- ACPI SCI
+ACPI: EC: ACPI EC GPE status set
+ACPI: EC: ACPI EC GPE dispatched               <- EC event handled, back to sleep
+ACPI: PM: Rearming ACPI SCI for wakeup
+...                                            (repeats several times)
+PM: Triggering wakeup from IRQ 7               <- pinctrl_amd
+ACPI: EC: ACPI EC GPE dispatched
+ACPI: PM: Wakeup after ACPI Notify sync        <- a Notify reached a wake-armed device
+GPIO 0 is active: 0x3805f800                   <- EC wake pin (_EVT pin 0)
+PM: suspend exit
+```
+
+| Evidence | Value | Meaning |
+|---|---|---|
+| `/sys/power/pm_wakeup_irq` | `9` | ACPI SCI, not a device interrupt |
+| EC GPE (boot log) | `ACPI: EC: GPE=0x3` | the EC uses GPE 0x03 |
+| `/sys/firmware/acpi/interrupts/gpe03` | 573,700 of 573,705 GPE events | practically all SCI traffic comes from the EC |
+| xHCI wakeup counters | 5 and 39 events | USB cannot explain more than 100 wakes |
+| Every resume in the loop | `EC GPE dispatched` → `Wakeup after ACPI Notify` → `GPIO 0` | an EC event runs a handler that Notifies a device, and the kernel resumes |
+
+The loop started after 53 minutes of clean sleep, with an incidental USB wake at 18:09:53 (`GPIO 59`, the Bolt receiver, reported as `ACPI non-EC GPE wakeup`). From the next suspend on, every wake came from the EC.
+
+**Not determined:** whether the EC events began with that resume or with a power-source change, and which `_Qxx` method and which device received the Notify. Pin 0's `_EVT` handler serves `LID0`, `ADP0`, `BAT0` and `PWRB`. With the lid closed, no AC change and the battery discharging, `BAT0` is the most plausible target, but it was not confirmed.
+
+**Why `acpi.ec_no_wakeup=1` fixes it:** it disables the EC GPE as a wake source during s2idle, so these EC events are no longer processed while suspended and never reach the Notify that resumes the system. The lid still wakes this machine with the parameter set, which suggests the EC asserts its wake pin directly for the lid but only through a query for these other events. That last part is inferred, not measured. It is consistent with the power button test: with both parameters set, the power button wakes the machine as a direct GPIO interrupt (`Wakeup unrelated to ACPI SCI`, `GPIO 0 is active`), so pin 0 is still a wake source and only the EC GPE path is gone.
+
+**Validation** with both parameters, on battery, lid closed, no monitor: **one suspend of 2 h 22 min** (19:42 → 22:04), woken by opening the lid. Battery 81 % → 79 %, about 0.85 %/h or 0.5 W. Before: 119 cycles in 73 minutes. With the HDMI monitor connected and both parameters: 66 s asleep untouched, woken by the power button.
+
+`ACPI EC GPE …` lines are printed only while `pm_debug_messages` is enabled, and that setting does not survive a reboot. Their absence after a reboot proves nothing; judge by how long the machine actually stayed asleep.
+
+**Why the original tests missed it:** tests A–H ran on AC power, at a desk, mostly with the monitor connected. This failure mode needs the lid closed on battery for several minutes.
+
+Logs and counters: [`evidence/05-ec-wake-loop.md`](evidence/05-ec-wake-loop.md).
 
 ## Applying and verifying the fix
 
@@ -123,53 +182,69 @@ Full logs and table excerpts are in [`evidence/`](evidence/): [hang history](evi
 # 1) Confirm your GPIO controller name (on Rembrandt/Raphael it is AMDI0030:00)
 ls /sys/bus/platform/drivers/amd_gpio/
 
-# 2) Add the parameter to all installed kernels (Fedora)
-sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"
+# 2) Add both parameters to all installed kernels (Fedora)
+sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4 acpi.ec_no_wakeup=1"
 sudo reboot
 
 # 3) After reboot
 cat /sys/module/gpiolib_acpi/parameters/ignore_wake   # AMDI0030:00@4
 sudo dmesg | grep -i 'ignoring wake'                   # amd_gpio AMDI0030:00: Ignoring wakeup on pin 4
+cat /sys/module/acpi/parameters/ec_no_wakeup           # Y
 ```
 
-Then suspend with the monitor connected and don't touch anything for a minute. The power LED should keep pulsing. Or run [`diagnose-spurious-wake.sh`](#diagnosing-and-fixing-with-the-script).
+Then test both scenarios:
+
+1. **HDMI:** suspend with the monitor connected and don't touch anything for a minute. The power LED should keep pulsing. Or run [`diagnose-spurious-wake.sh`](#diagnosing-and-fixing-with-the-script).
+2. **Lid closed on battery:** unplug the charger, close the lid and leave it 15–20 minutes, then open it. It should wake on lid open, and the journal should show a single suspend:
+
+   ```bash
+   journalctl -b --since "-25 min" -o short-iso | grep -E "PM: suspend (entry|exit)|Lid (opened|closed)"
+   ```
+
+   Check that opening the lid wakes it. If on your model it doesn't, the power button and a USB keyboard still do; please open an issue.
 
 Validation on the tested system: 23.5 minutes of uninterrupted sleep with the HDMI monitor connected, **including a real 6-minute power outage** (AC unplugged/replugged and the monitor power-cycled) without a single wake; woken only by the keyboard.
 
 First full night with the fix: **one** suspend of **9 h 51 min** (00:10 → 10:02), woken by the keyboard (`GPIO 59`). The night before, without the fix, there were about 60 suspends of 5–7 s each, ending in a hang.
 
-After a kernel update, check `cat /proc/cmdline` still contains the parameter. After a **BIOS update**, re-run the diagnosis: the pin number could change.
+With both parameters, on battery and with the lid closed: one suspend of 2 h 22 min, woken by opening the lid ([second failure mode](#second-failure-mode-ec-wake-loop-lid-closed-on-battery)).
+
+After a kernel update, check `cat /proc/cmdline` still contains both parameters. After a **BIOS update**, re-run the diagnosis: the pin number could change.
 
 ## Other distributions
 
-The workaround is a plain kernel parameter, so it works on any distribution; only the way to add it changes. Check your controller name first with `ls /sys/bus/platform/drivers/amd_gpio/`, then:
+The workaround is two plain kernel parameters, so it works on any distribution; only the way to add it changes. Check your controller name first with `ls /sys/bus/platform/drivers/amd_gpio/`, then:
 
 | Distribution / bootloader | Add the parameter | Then |
 |---|---|---|
-| Fedora, RHEL, CentOS Stream | `sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"` | reboot |
-| Ubuntu, Debian, Linux Mint, Zorin (GRUB) | append `gpiolib_acpi.ignore_wake=AMDI0030:00@4` inside the quotes of `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub` | `sudo update-grub`, reboot |
+| Fedora, RHEL, CentOS Stream | `sudo grubby --update-kernel=ALL --args="gpiolib_acpi.ignore_wake=AMDI0030:00@4 acpi.ec_no_wakeup=1"` | reboot |
+| Ubuntu, Debian, Linux Mint, Zorin (GRUB) | append `gpiolib_acpi.ignore_wake=AMDI0030:00@4 acpi.ec_no_wakeup=1` inside the quotes of `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub` | `sudo update-grub`, reboot |
 | Arch, Manjaro, EndeavourOS (GRUB) | same edit of `/etc/default/grub` | `sudo grub-mkconfig -o /boot/grub/grub.cfg`, reboot |
 | openSUSE (GRUB 2) | same edit of `/etc/default/grub` (or YaST → Boot Loader) | `sudo grub2-mkconfig -o /boot/grub2/grub.cfg`, reboot |
-| Pop!_OS (kernelstub) | `sudo kernelstub -a "gpiolib_acpi.ignore_wake=AMDI0030:00@4"` | reboot |
-| systemd-boot | add it to the `options` line of your entries in `/boot/loader/entries/*.conf`, or to `/etc/kernel/cmdline` if your distro regenerates entries with `kernel-install` | reboot |
+| Pop!_OS (kernelstub) | `sudo kernelstub -a "gpiolib_acpi.ignore_wake=AMDI0030:00@4 acpi.ec_no_wakeup=1"` | reboot |
+| systemd-boot | add both to the `options` line of your entries in `/boot/loader/entries/*.conf`, or to `/etc/kernel/cmdline` if your distro regenerates entries with `kernel-install` | reboot |
 
-Verify exactly as above (`cat /sys/module/gpiolib_acpi/parameters/ignore_wake` and `dmesg | grep -i 'ignoring wake'`).
+Verify exactly as above (`cat /sys/module/gpiolib_acpi/parameters/ignore_wake`, `dmesg | grep -i 'ignoring wake'` and `cat /sys/module/acpi/parameters/ec_no_wakeup`).
 
 Models whose USB-C/DisplayPort output also self-wakes may need a second pin: the Legion Pro 5 16ARX8 uses `AMDI0030:00@2,AMDI0030:00@4`. The script below finds the right pins for your machine.
 
 ## What still wakes the machine
 
+Status with both parameters (`ignore_wake` + `ec_no_wakeup`):
+
 | Source | Pin | Status |
 |---|---|---|
-| Power button | GPIO 0 | ✔ verified |
-| USB keyboard/mouse (Logi Bolt receiver) | GPIO 59 → `XHC1` | ✔ verified, works with the lid closed |
-| Lid open | GPIO 0 (EC → `LID0`) | expected, not yet verified |
-| AC adapter plug/unplug | GPIO 0 (EC → `ADP0`) | does **not** wake (observed during a power outage) |
+| USB keyboard/mouse (Logi Bolt receiver) | GPIO 59 → `XHC1` | ✔ verified, works with the lid closed ([test E](evidence/03-wake-source-tests.md)) |
+| Lid open | GPIO 0 (EC → `LID0`) | ✔ verified on 2026-10-26 (2 h 22 min suspend, on battery) |
+| Power button | GPIO 0 | ✔ verified on 2026-10-26 (direct GPIO wake: `Wakeup unrelated to ACPI SCI`, `GPIO 0 is active`) |
+| AC adapter plug/unplug | GPIO 0 (EC → `ADP0`) | does **not** wake (observed during a power outage, with `ignore_wake` alone) |
+
+Lid wake with `ec_no_wakeup` is verified on this model only. Other models may route the lid through the EC differently: check it after applying.
 
 ## Things that did not fix it
 
 - **Monitor settings:** turning off Anynet+ (HDMI-CEC) and changing source detection on the Samsung did not help.
-- **`acpi.ec_no_wakeup=1`:** it removed the EC path from the picture, but the wake then arrived directly as a GPIO interrupt (`Wakeup unrelated to ACPI SCI`, still `GPIO 4`). It is not needed with `ignore_wake`, and keeping it would also block legitimate EC wakes such as the lid.
+- **`acpi.ec_no_wakeup=1` alone, for the HDMI wake:** it removed the EC path from the picture, but the wake then arrived directly as a GPIO interrupt (`Wakeup unrelated to ACPI SCI`, still `GPIO 4`), so it does not fix the HDMI case by itself. It **is** needed for the [second failure mode](#second-failure-mode-ec-wake-loop-lid-closed-on-battery), and on this model it does not block the lid. *An earlier version of this README said it was not needed and would block the lid; both statements were wrong.*
 - **NVIDIA suspend services:** with `UseKernelSuspendNotifiers: 1`, `nvidia-suspend.service` / `nvidia-resume.service` are **skipped by design** (`ExecCondition` only runs them when that value is 0). `PreserveVideoMemoryAllocations: 1` and empty `TemporaryFilePath` are also expected in that mode. Neither is the cause.
 - **Longer idle timeout:** it would only reduce the number of cycles, not stop the self-wakes.
 
@@ -191,6 +266,16 @@ chmod +x diagnose-spurious-wake.sh
 ```
 
 Run it with the external monitor connected and **don't touch the keyboard or mouse** until it reports. If the machine doesn't wake by itself within a minute, wake it yourself: a long sleep woken by your own input is the healthy result, and the script will say there is nothing to fix.
+
+**Scope:** the script currently detects GPIO wakes only (the HDMI case). It does not yet detect the EC wake loop, which rarely reproduces in a one-minute test because it needs the lid closed on battery. To look for it in your journal, list the real sleep time of each cycle:
+
+```bash
+journalctl -b -o short-unix -q -u systemd-suspend.service \
+  --grep 'Performing sleep|returned from sleep' |
+awk '/Performing/{t=$1} /returned/{printf "%s  slept %7.0f s\n", strftime("%d %H:%M:%S",t), $1-t}'
+```
+
+Dozens of sleeps of 10 s or less, about 30 s apart, with the lid closed and `cat /sys/power/pm_wakeup_irq` showing `9` (the ACPI SCI), point to the EC loop.
 
 **Safeguards**
 
@@ -223,13 +308,13 @@ Before posting your own logs anywhere, remove lines that identify your network (
 ## Reverting
 
 ```bash
-./diagnose-spurious-wake.sh --revert          # any supported distro, asks first
-# or by hand on Fedora:
-sudo grubby --update-kernel=ALL --remove-args="gpiolib_acpi.ignore_wake=AMDI0030:00@4"
+./diagnose-spurious-wake.sh --revert          # removes ignore_wake only; any supported distro, asks first
+# or by hand on Fedora (both parameters):
+sudo grubby --update-kernel=ALL --remove-args="gpiolib_acpi.ignore_wake=AMDI0030:00@4 acpi.ec_no_wakeup=1"
 sudo reboot
 ```
 
-On other distributions, remove the token from wherever you added it ([table above](#other-distributions)), regenerate the boot configuration and reboot.
+On other distributions, remove both tokens from wherever you added them ([table above](#other-distributions)), regenerate the boot configuration and reboot.
 
 ## Related reports and upstream position
 
